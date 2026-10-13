@@ -43,7 +43,7 @@ struct SocketDeleter
 
 struct AddressDeleter
 {
-  void operator()(ArchNetAddress address) const
+  void operator()(ArchNetAddress address) const noexcept
   {
     ARCH->closeAddr(address);
   }
@@ -84,20 +84,23 @@ public:
   bool open()
   {
     server.setProxy(QNetworkProxy::NoProxy);
-    if (!server.listen(QHostAddress::LocalHostIPv6, 0)) {
+    const bool ipv6 = server.listen(QHostAddress::LocalHostIPv6, 0);
+    if (!ipv6 && !server.listen(QHostAddress::LocalHost, 0)) {
       error = server.errorString();
       return false;
     }
 
     try {
-      NumericAddresses addresses("::1");
+      const char *host = ipv6 ? "::1" : "127.0.0.1";
+      const auto family = ipv6 ? AddressFamily::INet6 : AddressFamily::INet;
+      NumericAddresses addresses(host);
       if (addresses.get().empty()) {
-        error = "No address returned for IPv6 loopback";
+        error = QString("No address returned for %1 loopback").arg(host);
         return false;
       }
       auto address = addresses.get().front();
       ARCH->setAddrPort(address, server.serverPort());
-      socket.reset(ARCH->newSocket(AddressFamily::INet6, IArchNetwork::SocketType::Stream));
+      socket.reset(ARCH->newSocket(family, IArchNetwork::SocketType::Stream));
       if (!ARCH->connectSocket(socket.get(), address)) {
         PollEntry entry{socket.get(), PollEventMask::Out, 0};
         if (ARCH->pollSocket(&entry, 1, kTimeoutMs / 1000.0) != 1 || (entry.m_revents & PollEventMask::Out) == 0) {
@@ -120,6 +123,7 @@ public:
       error = "Loopback server returned no pending socket";
       return false;
     }
+    peer->setParent(nullptr);
     peer->setProxy(QNetworkProxy::NoProxy);
     return true;
   }
@@ -298,9 +302,7 @@ private Q_SLOTS:
     QCOMPARE(ARCH->getAddrFamily(address.get()), static_cast<AddressFamily>(family));
     QCOMPARE(ARCH->getAddrPort(address.get()), 0);
     QCOMPARE(QString::fromStdString(ARCH->addrToString(address.get())), literal);
-    if (static_cast<AddressFamily>(family) == AddressFamily::INet) {
-      QVERIFY(ARCH->isAnyAddr(address.get()));
-    }
+    QVERIFY(ARCH->isAnyAddr(address.get()));
   }
 
   void nameToAddr_numericLoopbackIsNotAny_data()
@@ -507,7 +509,13 @@ private Q_SLOTS:
     QVERIFY(ready);
     QVERIFY(!finishedEarly);
     QVERIFY(unblocked);
-    QVERIFY(!worker.error);
+    if (worker.error) {
+      try {
+        std::rethrow_exception(worker.error);
+      } catch (const std::exception &e) {
+        QFAIL(qPrintable(QString("Worker thread failed with exception: %1").arg(e.what())));
+      }
+    }
     QCOMPARE(worker.result, 0);
     QCOMPARE(worker.events, 0);
   }
